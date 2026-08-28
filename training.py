@@ -20,6 +20,8 @@ LR = 1e-4
 X = np.load("spectra.npy")
 Y = np.load("labels.npy")
 
+X = np.array([x[::100] for x in X])
+
 # normalize spectra
 X = (X - X.mean(axis=1, keepdims=True)) / (X.std(axis=1, keepdims=True) + 1e-8)
 
@@ -118,6 +120,7 @@ for epoch in range(EPOCHS):
         x = x.to(device)
         y = y.to(device)
 
+
         pred = model(x)
         loss = criterion(pred, y)
 
@@ -128,5 +131,6 @@ for epoch in range(EPOCHS):
         total_loss += loss.item()
 
     print("Epoch:", epoch, "Loss:", total_loss / len(loader))
-
+torch.save(model.state_dict(), "spectra_model.pth")
+print("Model saved")
 print("Training finished.")
