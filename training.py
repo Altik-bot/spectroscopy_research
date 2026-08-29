@@ -1,18 +1,14 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
-from tqdm import tqdm
+from torch.utils.data import DataLoader, TensorDataset, random_split
 
 # -----------------------
 # CONFIG
 # -----------------------
-N = 5000
 BATCH_SIZE = 32
 EPOCHS = 15
 LR = 1e-4
-
-
 
 # -----------------------
 # LOAD DATA
@@ -20,21 +16,33 @@ LR = 1e-4
 X = np.load("spectra.npy")
 Y = np.load("labels.npy")
 
-X = np.array([x[::100] for x in X])
+# downsample spectra
+X = np.array([x[::50] for x in X])
 
-# normalize spectra
+# normalize X per sample
 X = (X - X.mean(axis=1, keepdims=True)) / (X.std(axis=1, keepdims=True) + 1e-8)
 
-# normalize targets (important for stability)
+# normalize Y globally
 Y_mean = Y.mean(axis=0)
 Y_std = Y.std(axis=0)
-Y = (Y - Y_mean) / Y_std
+Y_norm = (Y - Y_mean) / Y_std
 
+# tensors
 X = torch.tensor(X, dtype=torch.float32).unsqueeze(1)
-Y = torch.tensor(Y, dtype=torch.float32)
+Y_norm = torch.tensor(Y_norm, dtype=torch.float32)
 
-dataset = TensorDataset(X, Y)
-loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+dataset = TensorDataset(X, Y_norm)
+
+# -----------------------
+# SPLIT
+# -----------------------
+train_size = int(0.8 * len(dataset))
+val_size = len(dataset) - train_size
+
+train_ds, val_ds = random_split(dataset, [train_size, val_size])
+
+train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
+val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False)
 
 # -----------------------
 # MODEL
@@ -42,13 +50,10 @@ loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 class ResidualBlock(nn.Module):
     def __init__(self, in_ch, out_ch):
         super().__init__()
-
         self.conv1 = nn.Conv1d(in_ch, out_ch, 7, padding=3)
         self.bn1 = nn.BatchNorm1d(out_ch)
-
         self.conv2 = nn.Conv1d(out_ch, out_ch, 7, padding=3)
         self.bn2 = nn.BatchNorm1d(out_ch)
-
         self.relu = nn.ReLU()
 
         self.shortcut = nn.Identity()
@@ -57,17 +62,14 @@ class ResidualBlock(nn.Module):
 
     def forward(self, x):
         identity = self.shortcut(x)
-
         out = self.relu(self.bn1(self.conv1(x)))
         out = self.bn2(self.conv2(out))
-
         return self.relu(out + identity)
 
 
 class SpectraResNet(nn.Module):
     def __init__(self):
         super().__init__()
-
         self.stem = nn.Sequential(
             nn.Conv1d(1, 32, 9, padding=4),
             nn.ReLU()
@@ -100,9 +102,8 @@ class SpectraResNet(nn.Module):
         x = x.squeeze(-1)
         return self.head(x)
 
-
 # -----------------------
-# TRAINING
+# TRAIN SETUP
 # -----------------------
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -111,15 +112,31 @@ model = SpectraResNet().to(device)
 criterion = nn.SmoothL1Loss()
 optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 
+# -----------------------
+# VALIDATION FUNCTION
+# -----------------------
+def val_loss(model, loader):
+    model.eval()
+    total = 0
+    with torch.no_grad():
+        for x, y in loader:
+            x = x.to(device)
+            y = y.to(device)
+            total += criterion(model(x), y).item()
+    return total / len(loader)
+
+# -----------------------
+# TRAIN LOOP
+# -----------------------
 print("Training started...")
 
 for epoch in range(EPOCHS):
+    model.train()
     total_loss = 0
 
-    for x, y in loader:
+    for x, y in train_loader:
         x = x.to(device)
         y = y.to(device)
-
 
         pred = model(x)
         loss = criterion(pred, y)
@@ -130,7 +147,21 @@ for epoch in range(EPOCHS):
 
         total_loss += loss.item()
 
-    print("Epoch:", epoch, "Loss:", total_loss / len(loader))
-torch.save(model.state_dict(), "spectra_model.pth")
+    train_loss = total_loss / len(train_loader)
+    v_loss = val_loss(model, val_loader)
+
+    print("Epoch:", epoch,
+          "Train Loss:", train_loss,
+          "Val Loss:", v_loss)
+
+# -----------------------
+# SAVE MODEL + STATS
+# -----------------------
+torch.save({
+    "model_state": model.state_dict(),
+    "y_mean": Y_mean,
+    "y_std": Y_std
+}, "spectra_model_full.pth")
+
 print("Model saved")
-print("Training finished.")
+print("Training finished")
