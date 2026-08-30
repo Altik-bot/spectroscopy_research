@@ -2,40 +2,33 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset, random_split
+import csv
+import torch
 
-# -----------------------
-# CONFIG
-# -----------------------
+def add_gaussian_noise(x, mean=0.0, std=0.01):
+    noise = torch.randn_like(x) * std + mean
+    return x + noise
+
 BATCH_SIZE = 32
 EPOCHS = 15
 LR = 1e-4
-
-# -----------------------
-# LOAD DATA
-# -----------------------
+NOISE_STD = 0.02
 X = np.load("spectra.npy")
 Y = np.load("labels.npy")
 
-# downsample spectra
 X = np.array([x[::50] for x in X])
 
-# normalize X per sample
 X = (X - X.mean(axis=1, keepdims=True)) / (X.std(axis=1, keepdims=True) + 1e-8)
 
-# normalize Y globally
 Y_mean = Y.mean(axis=0)
 Y_std = Y.std(axis=0)
 Y_norm = (Y - Y_mean) / Y_std
 
-# tensors
 X = torch.tensor(X, dtype=torch.float32).unsqueeze(1)
 Y_norm = torch.tensor(Y_norm, dtype=torch.float32)
 
 dataset = TensorDataset(X, Y_norm)
 
-# -----------------------
-# SPLIT
-# -----------------------
 train_size = int(0.8 * len(dataset))
 val_size = len(dataset) - train_size
 
@@ -44,9 +37,6 @@ train_ds, val_ds = random_split(dataset, [train_size, val_size])
 train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
 val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False)
 
-# -----------------------
-# MODEL
-# -----------------------
 class ResidualBlock(nn.Module):
     def __init__(self, in_ch, out_ch):
         super().__init__()
@@ -102,9 +92,6 @@ class SpectraResNet(nn.Module):
         x = x.squeeze(-1)
         return self.head(x)
 
-# -----------------------
-# TRAIN SETUP
-# -----------------------
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 model = SpectraResNet().to(device)
@@ -112,9 +99,6 @@ model = SpectraResNet().to(device)
 criterion = nn.SmoothL1Loss()
 optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 
-# -----------------------
-# VALIDATION FUNCTION
-# -----------------------
 def val_loss(model, loader):
     model.eval()
     total = 0
@@ -125,42 +109,42 @@ def val_loss(model, loader):
             total += criterion(model(x), y).item()
     return total / len(loader)
 
-# -----------------------
-# TRAIN LOOP
-# -----------------------
 print("Training started...")
+with open("output.csv","w")as f:
+    aa = csv.writer(f)
+    aa.writerow(["epoch","train_loss","val_loss"])
+    for epoch in range(EPOCHS):
+       model.train()
+       total_loss = 0
 
-for epoch in range(EPOCHS):
-    model.train()
-    total_loss = 0
+       for x, y in train_loader:
+           x = x.to(device)
+           y = y.to(device)
+           x = add_gaussian_noise(x,std = NOISE_STD)
+           pred = model(x)
+           loss = criterion(pred, y)
 
-    for x, y in train_loader:
-        x = x.to(device)
-        y = y.to(device)
+           optimizer.zero_grad()
+           loss.backward()
+           optimizer.step()
 
-        pred = model(x)
-        loss = criterion(pred, y)
+           total_loss += loss.item()
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        total_loss += loss.item()
-
-    train_loss = total_loss / len(train_loader)
-    v_loss = val_loss(model, val_loader)
-
-    print("Epoch:", epoch,
-          "Train Loss:", train_loss,
-          "Val Loss:", v_loss)
-
-# -----------------------
-# SAVE MODEL + STATS
-# -----------------------
+       train_loss = total_loss / len(train_loader)
+       v_loss = val_loss(model, val_loader)
+       aa.writerow([epoch,train_loss,v_loss])
+       print("Epoch:", epoch,
+             "Train Loss:", train_loss,
+             "Val Loss:", v_loss)
 torch.save({
     "model_state": model.state_dict(),
     "y_mean": Y_mean,
-    "y_std": Y_std
+    "y_std": Y_std,
+    "config": {
+        "noise_std": NOISE_STD,
+        "batch_size": BATCH_SIZE,
+        "epochs": EPOCHS
+    }
 }, "spectra_model_full.pth")
 
 print("Model saved")
